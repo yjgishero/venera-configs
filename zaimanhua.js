@@ -1,8 +1,8 @@
 class Zaimanhua extends ComicSource {
   // 基础信息
   name = "再漫画";
-  key = "zaimanhua";
-  version = "1.0.2";
+  key = "zaimanhuachange";
+  version = "1.0.3";
   minAppVersion = "1.0.0";
   url =
     "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/zaimanhua.js";
@@ -10,7 +10,9 @@ class Zaimanhua extends ComicSource {
   // 初始化请求头
   init() {
     this.headers = {
-      "User-Agent": "Mozilla/5.0 (Linux; Android) Mobile",
+      // "User-Agent": "Mozilla/5.0 (Linux; Android) Mobile",
+
+      "User-Agent": "Mozilla/5.0 (Linux; Android 10; K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.0.0 Mobile Safari/537.36",
       "authorization": `Bearer ${this.loadData("token") || ""}`,
     };
   }
@@ -278,6 +280,41 @@ class Zaimanhua extends ComicSource {
   //搜索
   search = {
     load: async (keyword, options, page) => {
+      // 检测是否是纯数字 ID
+      const trimmed = keyword.trim();
+      if (/^\d+$/.test(trimmed)) {
+        try {
+          const id = trimmed;
+          const res = await Network.get(
+            this.buildUrl(`comic/detail/${id}?channel=android`),
+            this.headers
+          );
+          this.checkResponseStatus(res);
+          const response = JSON.parse(res.body);
+          if (response.errno !== 0) throw new Error(response.errmsg || "加载失败");
+          const data = response.data.data;
+
+          // 构造与搜索列表项结构一致的对象
+          const comicItem = {
+            id: id,
+            title: data.title,
+            cover: data.cover,
+            // 作者转为逗号分隔的字符串
+            authors: (data.authors || []).map(a => a.tag_name).join(','),
+            // 状态和标签转为斜杠分隔的字符串，以便 parseComic 正确拆分
+            status: (data.status || []).map(s => s.tag_name).join('/'),
+            types: (data.types || []).map(t => t.tag_name).join('/'),
+            description: data.description,
+          };
+          const parsed = this.parseComic(comicItem);
+          return { comics: [parsed] };
+        } catch (e) {
+          UI.showMessage(`查找失败: ${e.message}`);
+          return { comics: [] };
+        }
+      }
+
+      // 原有的关键词搜索逻辑
       const res = await Network.get(
         this.buildUrl(
           `search/index?keyword=${encodeURIComponent(
@@ -333,7 +370,6 @@ class Zaimanhua extends ComicSource {
     return date.toISOString().split("T")[0];
   }
 
-  //漫画详情
   comic = {
     loadInfo: async (id) => {
       const getFavoriteStatus = async (id) => {
@@ -371,7 +407,6 @@ class Zaimanhua extends ComicSource {
           return result;
         }, new Map());
       }
-      // 分类标签
       const { authors, status, types } = data;
       const tagMapper = (arr) => arr.map((t) => t.tag_name);
       return {
@@ -389,6 +424,7 @@ class Zaimanhua extends ComicSource {
         subId: id,
       };
     },
+
     loadEp: async (comicId, epId) => {
       const res = await Network.get(
         this.buildUrl(`comic/chapter/${comicId}/${epId}`),
@@ -397,13 +433,74 @@ class Zaimanhua extends ComicSource {
       const data = JSON.parse(res.body).data.data;
       return { images: data.page_url_hd || data.page_url };
     },
-    
+
+    // ========== 新增：加载章节评论 ==========
+    loadChapterComments: async (comicId, epId, page, replyTo) => {
+      try {
+        const url = this.buildUrl(
+          `viewpoint/list?comicId=${comicId}&chapterId=${epId}`
+        );
+        const res = await Network.get(url, this.headers);
+        this.checkResponseStatus(res);
+
+        const response = JSON.parse(res.body);
+        const data = response.data;
+
+        if (!data || !data.list || data.list.length === 0) {
+          return { comments: [] };
+        }
+
+        // 每个 item 是数组，例如: [184515, 0, 4, 18, "", 0, 1127800, "19p影子太神了"]
+        const comments = data.list.map((item) => {
+          // 取最后一个元素作为评论内容
+          const content = item[item.length - 1] || "";
+          // 取倒数第二个元素（数字）作为用户ID，转为字符串
+          const userId = item.length >= 2 ? String(item[item.length - 2]) : "";
+          const userName = userId ? `用户${userId}` : "匿名用户";
+          return new Comment({
+            userName: userName,
+            avatar: "",                 // 接口不提供头像
+            content: content,
+            time: "",                   // 接口不提供时间
+            replyCount: 0,
+            score: 0,
+            id: null,
+            parentId: null,
+          });
+        });
+
+        return { comments: comments };
+      } catch (e) {
+        console.error("章节评论加载失败:", e);
+        return { comments: [] };
+      }
+    },
+
+    // ========== 新增：发送章节评论 ==========
+    sendChapterComment: async (comicId, epId, content, replyTo) => {
+      // 章节评论复用 comment/add 接口，obj_id 传章节 ID[reference:7]
+      if (!replyTo) replyTo = 0;
+      const res = await Network.post(
+        this.buildUrl(`comment/add`),
+        {
+          ...this.headers,
+          "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+        },
+        `obj_id=${epId}&content=${encodeURIComponent(
+          content
+        )}&to_comment_id=${replyTo}&type=4`
+      );
+      this.checkResponseStatus(res);
+      const response = JSON.parse(res.body);
+      if (response.errno !== 0) throw new Error(response.errmsg || "发送失败");
+      return "ok";
+    },
+
+    // ========== 原有：作品评论 ==========
     loadComments: async (comicId, subId, page, replyTo) => {
       try {
-        // 构建请求URL
         const url = this.buildUrl(
-          `comment/list?page=${page}&size=30&type=4&objId=${
-            subId || comicId
+          `comment/list?page=${page}&size=30&type=4&objId=${subId || comicId
           }&sortBy=1`
         );
         const res = await Network.get(url, this.headers);
@@ -412,39 +509,29 @@ class Zaimanhua extends ComicSource {
         const response = JSON.parse(res.body);
         const data = response.data;
 
-        /* 空数据检查 */
         if (!data || !data.commentIdList || !data.commentList) {
           UI.showMessage("暂时没有评论，快来发表第一条吧~");
           return { comments: [], maxPage: 0 };
         }
 
-        /* 处理评论ID列表 */
-        // 标准化ID数组：处理null/字符串/数组等多种情况
         const rawIds = Array.isArray(data.commentIdList)
           ? data.commentIdList
           : [];
-
-        // 展开所有ID并过滤无效值
         const allCommentIds = rawIds
-          .map((idStr) => `${idStr || ""}`.split(",")) // 转换为字符串再分割
+          .map((idStr) => `${idStr || ""}`.split(","))
           .flat()
           .filter((id) => id.trim() !== "");
 
-        // 最终ID处理流程
         const processComments = () => {
-          // 去重并验证ID有效性
           const validIds = [...new Set(allCommentIds)].filter((id) =>
             data.commentList.hasOwnProperty(id)
           );
-
-          // 过滤回复评论
           const filteredIds = replyTo
             ? validIds.filter(
-                (id) => data.commentList[id]?.to_comment_id == replyTo
-              )
+              (id) => data.commentList[id]?.to_comment_id == replyTo
+            )
             : validIds;
 
-          // 转换为评论对象
           return filteredIds.map((id) => {
             const comment = data.commentList[id];
             return new Comment({
@@ -460,7 +547,6 @@ class Zaimanhua extends ComicSource {
           });
         };
 
-        // 当没有有效评论时显示提示
         const comments = processComments();
         if (comments.length === 0) {
           UI.showMessage(replyTo ? "该评论暂无回复" : "这里还没有评论哦~");
@@ -476,12 +562,9 @@ class Zaimanhua extends ComicSource {
         return { comments: [], maxPage: 0 };
       }
     },
-  
-    // 发送评论, 返回任意值表示成功.
+
     sendComment: async (comicId, subId, content, replyTo) => {
-      if (!replyTo) {
-        replyTo = 0;
-      }
+      if (!replyTo) replyTo = 0;
       let res = await Network.post(
         this.buildUrl(`comment/add`),
         {
@@ -497,7 +580,7 @@ class Zaimanhua extends ComicSource {
       if (response.errno !== 0) throw new Error(response.errmsg || "加载失败");
       return "ok";
     },
-    // 点赞
+
     likeComment: async (comicId, subId, commentId, isLike) => {
       let res = await Network.post(
         this.buildUrl(`comment/addLike`),
@@ -510,6 +593,9 @@ class Zaimanhua extends ComicSource {
       this.checkResponseStatus(res);
       return "ok";
     },
+
+    // ========== 新增：ID 匹配规则（支持纯数字 ID 快速打开） ==========
+    idMatch: "^\\d+$",
   };
 
   settings = {
