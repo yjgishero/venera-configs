@@ -207,8 +207,26 @@
         "name": "zero搬运网",
         "fileName": "zerobyw33.js",
         "key": "zerobyw33",
-        "version": "1.6.0",
-        "description": "无法登录，目前仅游客模式"
+        "version": "1.2.0",
+        "description": "可以登录"
+    },
+    {
+        "name": "如漫画",
+        "fileName": "rumanhua.js",
+        "key": "rumanhua",
+        "version": "1.0.0"
+    },
+    {
+        "name": "51漫画",
+        "fileName": "51manga.js",
+        "key": "manga51",
+        "version": "1.1.0"
+    },
+    {
+        "name": "嗶哩漫畫",
+        "fileName": "bilimanga.js",
+        "key": "bilimanga",
+        "version": "1.1.0"
     },
     {
         "name": "MangaForFree",

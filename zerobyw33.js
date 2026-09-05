@@ -2,7 +2,7 @@ class ZeroByW33 extends ComicSource {
 
     name = "zero搬运网"
     key = "zerobyw33"
-    version = "1.1.0"
+    version = "1.2.0"
     minAppVersion = "1.6.0"
     url = "https://cdn.jsdelivr.net/gh/meaninglesslyy/venera-configs@main/zerobyw33.js"
 
@@ -75,13 +75,138 @@ class ZeroByW33 extends ComicSource {
         return m ? m[1] : "zerobyw33.com"
     }
 
+    // ============ 登录态 cookie 管理 ============
+
+    // 从响应头里解析 Set-Cookie（可能是字符串或数组）
+    parseCookies(headers) {
+        let sc = (headers && (headers["set-cookie"] || headers["Set-Cookie"])) || ""
+        let list = Array.isArray(sc) ? sc : [sc]
+        let map = {}
+        for (let s of list) {
+            if (!s) continue
+            // 单条可能用 ", " 拼接了多个 cookie（expires 里的逗号不会误伤）
+            let parts = String(s).split(/,(?=\s*[A-Za-z0-9_]+\=)/)
+            for (let p of parts) {
+                let m = p.match(/^\s*([^=;\s]+)=([^;]*)/)
+                if (m) map[m[1]] = m[2].trim()
+            }
+        }
+        return map
+    }
+
+    cookieString(map) {
+        return Object.keys(map).map(k => `${k}=${map[k]}`).join("; ")
+    }
+
+    cookieStringToMap(str) {
+        let map = {}
+        if (!str) return map
+        for (let part of String(str).split(/;\s*/)) {
+            let m = part.match(/^([^=]+)=(.*)$/)
+            if (m) map[m[1]] = m[2]
+        }
+        return map
+    }
+
+    // 把新的 Set-Cookie 合并进已保存的 cookie（保持 sid 等会话 cookie 新鲜）
+    mergeAndSaveCookies(headers) {
+        let saved = this.loadData("cookie")
+        if (!saved) return
+        let map = this.cookieStringToMap(saved)
+        let fresh = this.parseCookies(headers)
+        let changed = false
+        for (let k in fresh) {
+            if (map[k] !== fresh[k]) {
+                map[k] = fresh[k]
+                changed = true
+            }
+        }
+        if (changed) this.saveData("cookie", this.cookieString(map))
+    }
+
     pageHeaders() {
-        return {
+        let headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": this.base + "/pc/pc/",
         }
+        let cookie = this.loadData("cookie")
+        if (cookie) headers["Cookie"] = cookie
+        return headers
+    }
+
+    // ============ 账号登录（Discuz 标准表单登录，Cookie 会话） ============
+    account = {
+        /**
+         * 用账号密码登录。成功后 App 会自动保存账号密码，本站登录态保存在 Cookie 里。
+         */
+        login: async (account, pwd) => {
+            await this.ensureDomain()
+
+            // 1. 获取登录页，拿到 saltkey/sid 等会话 cookie 和表单里的 formhash
+            let loginUrl = this.base + "/member.php?mod=logging&action=login"
+            let res = await Network.get(loginUrl, this.pageHeaders())
+            if (res.status !== 200) {
+                throw "登录页请求失败: " + res.status
+            }
+
+            let cookieMap = this.parseCookies(res.headers)
+
+            let fh = res.body.match(/formhash=([a-f0-9]{8})/)
+            if (!fh) {
+                throw "无法获取登录校验码(formhash)，站点结构可能已变化"
+            }
+            let lh = res.body.match(/loginhash=([A-Za-z0-9]+)/)
+            let formhash = fh[1]
+            let loginhash = lh ? lh[1] : ""
+
+            // 2. 提交登录表单
+            let postUrl = this.base + "/member.php?mod=logging&action=login&loginsubmit=yes&formhash=" + formhash
+            if (loginhash) postUrl += "&loginhash=" + loginhash
+
+            let body = "referer=" + encodeURIComponent(this.base + "/pc/pc/") +
+                "&loginfield=username" +
+                "&username=" + encodeURIComponent(account) +
+                "&password=" + encodeURIComponent(pwd) +
+                "&questionid=0&answer=&cookietime=2592000"
+
+            let headers = {
+                ...this.pageHeaders(),
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": loginUrl,
+                "Origin": this.base,
+            }
+            let cookieStr = this.cookieString(cookieMap)
+            if (cookieStr) headers["Cookie"] = cookieStr
+
+            let res2 = await Network.post(postUrl, headers, body)
+
+            // 合并登录响应里下发的 cookie
+            let fresh = this.parseCookies(res2.headers)
+            for (let k in fresh) cookieMap[k] = fresh[k]
+
+            // 失败判定
+            if (res2.body && res2.body.indexOf("登录失败") !== -1) {
+                let msg = res2.body.match(/<p>(登录失败[^<]*)<\/p>/)
+                throw msg ? msg[1] : "登录失败，请检查账号密码"
+            }
+
+            // 成功判定：Discuz 登录成功会下发 _auth cookie
+            let authKey = Object.keys(cookieMap).find(k => k.indexOf("_auth") !== -1)
+            if (!authKey) {
+                throw "登录失败，未获取到登录态（可能触发了验证码）"
+            }
+
+            this.saveData("cookie", this.cookieString(cookieMap))
+            return "ok"
+        },
+
+        logout: () => {
+            this.deleteData("cookie")
+        },
+
+        registerWebsite: "https://www.zerobyw33.com/member.php?mod=register",
     }
 
     sleep(ms) {
@@ -104,6 +229,7 @@ class ZeroByW33 extends ComicSource {
     async fetchBody(label, url) {
         let res = await Network.get(url, this.pageHeaders())
         if (res.status !== 200) throw label + " 请求失败: " + res.status
+        this.mergeAndSaveCookies(res.headers)
         return res.body
     }
 
