@@ -2,7 +2,7 @@ class Zaimanhua extends ComicSource {
   // 基础信息
   name = "再漫画";
   key = "zaimanhuachange";
-  version = "1.0.3";
+  version = "1.0.4";
   minAppVersion = "1.0.0";
   url =
     "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/zaimanhua.js";
@@ -10,8 +10,6 @@ class Zaimanhua extends ComicSource {
   // 初始化请求头
   init() {
     this.headers = {
-      // "User-Agent": "Mozilla/5.0 (Linux; Android) Mobile",
-
       "User-Agent": "Mozilla/5.0 (Linux; Android 10; K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.0.0 Mobile Safari/537.36",
       "authorization": `Bearer ${this.loadData("token") || ""}`,
     };
@@ -434,7 +432,7 @@ class Zaimanhua extends ComicSource {
       return { images: data.page_url_hd || data.page_url };
     },
 
-    // ========== 新增：加载章节评论 ==========
+    // ========== 章节评论（用户名格式：用户+ID） ==========
     loadChapterComments: async (comicId, epId, page, replyTo) => {
       try {
         const url = this.buildUrl(
@@ -447,48 +445,42 @@ class Zaimanhua extends ComicSource {
         const data = response.data;
 
         if (!data || !data.list || data.list.length === 0) {
-          return { comments: [] };
+          return { comments: [], maxPage: 0 };
         }
-
-        // 每个 item 是数组，例如: [184515, 0, 4, 18, "", 0, 1127800, "19p影子太神了"]
-        const comments = data.list.map((item) => {
-          // 取最后一个元素作为评论内容
-          const content = item[item.length - 1] || "";
-          // 取倒数第二个元素（数字）作为用户ID，转为字符串
+        const comments = data.list.map((item, index) => {
+          // 根据日志结构：倒数第二个元素为用户ID，最后一个为内容
           const userId = item.length >= 2 ? String(item[item.length - 2]) : "";
-          const userName = userId ? `用户${userId}` : "匿名用户";
+          const content = item[item.length - 1] || "";
+          // 生成伪唯一评论ID（章节ID + 用户ID + 索引）
+          const commentId = `${epId}_${userId}_${index}`;
           return new Comment({
-            userName: userName,
-            avatar: "",                 // 接口不提供头像
+            userName: userId ? `用户${userId}` : "匿名用户",   // 恢复“用户”前缀
+            avatar: "",                                       // 接口不提供头像
             content: content,
-            time: "",                   // 接口不提供时间
+            time: "",                                         // 接口无时间
             replyCount: 0,
             score: 0,
-            id: null,
+            id: commentId,                                    // 唯一ID，防止刷新混乱
             parentId: null,
           });
         });
-
-        return { comments: comments };
+        // 该接口一次返回所有评论，不支持分页，设置 maxPage=1 防止循环请求
+        return { comments: comments, maxPage: 1 };
       } catch (e) {
         console.error("章节评论加载失败:", e);
-        return { comments: [] };
+        return { comments: [], maxPage: 0 };
       }
     },
 
-    // ========== 新增：发送章节评论 ==========
+    // ========== 发送章节评论 ==========
     sendChapterComment: async (comicId, epId, content, replyTo) => {
-      // 章节评论复用 comment/add 接口，obj_id 传章节 ID[reference:7]
-      if (!replyTo) replyTo = 0;
       const res = await Network.post(
-        this.buildUrl(`comment/add`),
+        this.buildUrl(`viewpoint/add`),
         {
           ...this.headers,
           "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
         },
-        `obj_id=${epId}&content=${encodeURIComponent(
-          content
-        )}&to_comment_id=${replyTo}&type=4`
+        `comicId=${comicId}&chapterId=${epId}&content=${encodeURIComponent(content)}`
       );
       this.checkResponseStatus(res);
       const response = JSON.parse(res.body);
